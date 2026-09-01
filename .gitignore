@@ -1,0 +1,12 @@
+node_modules/
+.wrangler/
+.mf/
+*.tsbuildinfo
+*.log
+.pnpm-debug.log*
+.npm
+.cache/
+
+
+.DS_Store
+Thumbs.db

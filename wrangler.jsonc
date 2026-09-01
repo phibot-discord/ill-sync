@@ -1,0 +1,23 @@
+{
+  "name": "phi-ill-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-30",
+  "account_id": "84f15756736ca53a547ffa05d311056f",
+  "workers_dev": true,
+  "preview_urls": false,
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "ILLS",
+      "bucket_name": "phi-web-assets"
+    }
+  ],
+  "vars": {
+    "ILL_REPO": "Catrong/phi-plugin-ill",
+    "ILL_REF": "main",
+    "ILL_PREFIX": "original_ill",
+    "ILL_DIRS": "illLow,illBlur,SP,chap"
+  }
+}

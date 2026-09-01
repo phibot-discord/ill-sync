@@ -1,0 +1,20 @@
+{
+  "name": "phi-ill-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --test-scheduled"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.127.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ]
+  },
+  "license": "MIT"
+}
