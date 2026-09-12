@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev --test-scheduled"
+    "dev": "wrangler dev --test-scheduled",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

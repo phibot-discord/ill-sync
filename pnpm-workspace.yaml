@@ -1,3 +1,6 @@
 # Keep this worker out of the webui / Yunzai workspaces.
 packages:
   - "."
+allowBuilds:
+  esbuild: true
+  workerd: true

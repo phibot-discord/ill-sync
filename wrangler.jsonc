@@ -14,10 +14,28 @@
       "bucket_name": "phi-web-assets"
     }
   ],
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "b3219909ec754ce99345167611cc3b28"
+    }
+  ],
   "vars": {
     "ILL_REPO": "Catrong/phi-plugin-ill",
     "ILL_REF": "main",
     "ILL_PREFIX": "original_ill",
-    "ILL_DIRS": "illLow,illBlur,SP,chap"
+    "ILL_DIRS": "illLow,illBlur,SP,chap,chartimg",
+    "INFO_REPO": "Catrong/phi-plugin",
+    "INFO_REF": "main",
+    "INFO_PREFIX": "info",
+    "INFO_FILES": "avatar.txt,infolist.json,nicklist.yaml,notesInfo.json,spinfo.json,tips.txt",
+    "INFOFILE_URL": "https://phib19.top:8080/get/infoFile",
+    "INFO_KV_KEY": "phi:infoFile"
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
   }
 }
