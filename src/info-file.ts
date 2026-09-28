@@ -1,15 +1,15 @@
-export const LEVELS = ["EZ", "HD", "IN", "AT"] as const
-export const CSV_HEADER = "id\tsong\tcomposer\tillustrator\tEZC\tHDC\tINC\tATC\tEZ\tHD\tIN\tAT"
+const LEVELS = ["EZ", "HD", "IN", "AT"] as const
+const CSV_HEADER = "id\tsong\tcomposer\tillustrator\tEZC\tHDC\tINC\tATC\tEZ\tHD\tIN\tAT"
 
-export type InfoChart = { charter?: string; difficulty?: string }
-export type InfoSong = {
+type InfoChart = { charter?: string; difficulty?: string }
+type InfoSong = {
   id?: string
   song?: string
   composer?: string
   illustrator?: string
   chart?: Partial<Record<(typeof LEVELS)[number], InfoChart>>
 }
-export type InfoFile = Record<string, InfoSong>
+type InfoFile = Record<string, InfoSong>
 
 function stripDotZero(id: string) {
   return id.endsWith(".0") ? id.slice(0, -2) : id

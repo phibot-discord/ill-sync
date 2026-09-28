@@ -1,8 +1,7 @@
-/**
- * Mirror Catrong/phi-plugin-ill jackets from GitHub, and chart levels from phib19.
- */
-
 import { infoFileToCsv, parseInfoFile, summarizeInfoFile } from "./info-file"
+import { chartTagProxyUrl, DEFAULT_CHART_TAG_API } from "./chart-tag-proxy"
+import { proxyAuthorized } from "./proxy-auth"
+import { tapProxyHeaders, tapProxyTarget } from "./tap-proxy"
 
 const STATE_KEY = "_sync/ills.json"
 const INFO_STATE_KEY = "_sync/info.json"
@@ -10,14 +9,38 @@ const TIME_BUDGET_MS = 25_000
 const CONCURRENCY = 4
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"])
 const DEFAULT_INFOFILE_URL = "https://phib19.top:8080/get/infoFile"
+const DEFAULT_TAGTREE_URL = "https://phib19.top:8080/chartsTag/get/tagTree"
 const DEFAULT_INFO_KV_KEY = "phi:infoFile"
 const DEFAULT_INFO_FILES = [
   "avatar.txt",
+  "chaplist.yaml",
   "infolist.json",
   "nicklist.yaml",
   "notesInfo.json",
   "spinfo.json",
   "tips.txt",
+]
+const DEFAULT_HTML_DIRS = ["avatar"]
+const DEFAULT_HTML_FILES = [
+  "otherimg/0.png",
+  "otherimg/1.png",
+  "otherimg/2.png",
+  "otherimg/3.png",
+  "otherimg/4.png",
+  "otherimg/5.png",
+  "otherimg/A.png",
+  "otherimg/B.png",
+  "otherimg/C.png",
+  "otherimg/F.png",
+  "otherimg/FC.png",
+  "otherimg/NEW.png",
+  "otherimg/S.png",
+  "otherimg/V.png",
+  "otherimg/phi.png",
+  "otherimg/phigros.png",
+  "otherimg/data.png",
+  "otherimg/Star1.png",
+  "otherimg/Star2.png",
 ]
 
 type R2Bucket = {
@@ -52,10 +75,17 @@ type Env = {
   INFO_REF?: string
   INFO_PREFIX?: string
   INFO_FILES?: string
+  HTML_PREFIX?: string
+  HTML_DIRS?: string
+  HTML_FILES?: string
   INFOFILE_URL?: string
+  TAGTREE_URL?: string
+  CHART_TAG_API?: string
   INFO_KV_KEY?: string
   GITHUB_TOKEN?: string
   SYNC_SECRET?: string
+  /** `wrangler secret put PROXY_SECRET`; the WebUI sends it as `x-phi-proxy-key`. */
+  PROXY_SECRET?: string
 }
 
 type FileEnt = { path: string; sha: string; size: number }
@@ -85,12 +115,15 @@ type InfoState = {
   target?: string
   manifest: Record<string, string>
   pending: FileEnt[]
+  live: string[]
   phigros?: string
   phigrosVerNum?: number
   levelsSha?: string
   levelsSongs?: number
   levelsMax?: number
   levelsError?: string
+  tagTreeSha?: string
+  tagTreeError?: string
   updatedAt?: string
   lastError?: string
   lastRun?: State["lastRun"]
@@ -139,10 +172,9 @@ function mimeOf(path: string): string {
   }
 }
 
-function wanted(env: Env, path: string): boolean {
+function wanted(dirs: Set<string>, path: string): boolean {
   if (!IMAGE_EXT.has(extOf(path))) return false
-  const top = path.split("/")[0]
-  return dirsOf(env).includes(top || "")
+  return dirs.has(path.split("/")[0] || "")
 }
 
 async function gh(env: Env, url: string): Promise<Response> {
@@ -200,9 +232,10 @@ async function listTree(env: Env, commit: string): Promise<FileEnt[]> {
   const res = await gh(env, `https://api.github.com/repos/${env.ILL_REPO}/git/trees/${commit}?recursive=1`)
   const body = (await res.json()) as { truncated?: boolean; tree?: TreeEntry[] }
   if (body.truncated) throw new Error("GitHub tree truncated")
+  const dirs = new Set(dirsOf(env))
   const out: FileEnt[] = []
   for (const ent of body.tree || []) {
-    if (ent.type !== "blob" || !wanted(env, ent.path)) continue
+    if (ent.type !== "blob" || !wanted(dirs, ent.path)) continue
     out.push({ path: ent.path, sha: ent.sha, size: ent.size || 0 })
   }
   return out
@@ -275,16 +308,13 @@ async function putOne(env: Env, commit: string, file: FileEnt): Promise<"copied"
   return putBlob(env, env.ILL_REPO, commit, file.path, r2Key(env, file.path), file.sha)
 }
 
-async function dropStale(env: Env, keep: Set<string>): Promise<number> {
-  const prefix = `${prefixOf(env)}/`
+async function dropStale(env: Env, prefix: string, keep: Set<string>): Promise<number> {
   let cursor: string | undefined
   const stale: string[] = []
   for (;;) {
     const page = await env.ILLS.list({ prefix, cursor, limit: 1000 })
     for (const obj of page.objects) {
       const rel = obj.key.slice(prefix.length)
-      const top = rel.split("/")[0]
-      if (!dirsOf(env).includes(top || "")) continue
       if (!keep.has(rel)) stale.push(obj.key)
     }
     if (!page.truncated) break
@@ -297,19 +327,23 @@ async function dropStale(env: Env, keep: Set<string>): Promise<number> {
   return stale.length
 }
 
-async function copyBatch(env: Env, commit: string, state: State): Promise<State["lastRun"]> {
+type RunSummary = NonNullable<State["lastRun"]>
+
+async function drain(
+  state: { pending: FileEnt[]; manifest: Record<string, string>; lastError?: string },
+  commit: string,
+  put: (file: FileEnt) => Promise<"copied" | "skipped">,
+): Promise<RunSummary> {
   const started = Date.now()
   let copied = 0
   let skipped = 0
   let failed = 0
   const leftover: FileEnt[] = []
   const queue = state.pending.slice()
-  state.pending = []
 
   const run = async (file: FileEnt) => {
     try {
-      const kind = await putOne(env, commit, file)
-      if (kind === "copied") copied += 1
+      if ((await put(file)) === "copied") copied += 1
       else skipped += 1
       state.manifest[file.path] = file.sha
     } catch (err) {
@@ -325,6 +359,11 @@ async function copyBatch(env: Env, commit: string, state: State): Promise<State[
   }
   leftover.push(...queue)
   state.pending = leftover
+  return { copied, skipped, failed, remaining: leftover.length, ms: Date.now() - started, commit }
+}
+
+async function copyBatch(env: Env, commit: string, state: State): Promise<RunSummary> {
+  const run = await drain(state, commit, file => putOne(env, commit, file))
   if (!state.pending.length) {
     state.commit = commit
     state.lastError = undefined
@@ -333,20 +372,13 @@ async function copyBatch(env: Env, commit: string, state: State): Promise<State[
       for (const path of Object.keys(state.manifest)) {
         if (!keep.has(path)) delete state.manifest[path]
       }
-      await dropStale(env, keep)
+      await dropStale(env, `${prefixOf(env)}/`, keep)
     }
   }
-  return {
-    copied,
-    skipped,
-    failed,
-    remaining: state.pending.length,
-    ms: Date.now() - started,
-    commit,
-  }
+  return run
 }
 
-export async function syncIlls(env: Env): Promise<State> {
+async function syncIlls(env: Env): Promise<State> {
   const state = await loadState(env)
   const commit = await refreshQueue(env, state)
   if (state.pending.length) state.lastRun = await copyBatch(env, commit, state)
@@ -383,9 +415,49 @@ function infoFileNames(env: Env): string[] {
     .filter(name => name && name !== "info.csv")
 }
 
+function htmlPrefixOf(env: Env): string {
+  return (env.HTML_PREFIX || "html").replace(/\/+$/, "")
+}
+
+function csvList(raw: string | undefined, fallback: string[]): string[] {
+  if (raw === undefined) return fallback
+  return raw
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+}
+
+async function listHtml(env: Env, commit: string): Promise<FileEnt[]> {
+  const keepByDir = new Map<string, Set<string> | null>()
+  for (const dir of csvList(env.HTML_DIRS, DEFAULT_HTML_DIRS)) keepByDir.set(dir, null)
+  for (const file of csvList(env.HTML_FILES, DEFAULT_HTML_FILES)) {
+    const i = file.lastIndexOf("/")
+    if (i < 0) continue
+    const dir = file.slice(0, i)
+    const cur = keepByDir.get(dir)
+    if (cur === null) continue
+    const names = cur ?? new Set<string>()
+    names.add(file.slice(i + 1))
+    keepByDir.set(dir, names)
+  }
+  const out: FileEnt[] = []
+  for (const [dir, keep] of keepByDir) {
+    const path = dir.split("/").map(encodeURIComponent).join("/")
+    const res = await gh(env, `https://api.github.com/repos/${infoRepo(env)}/contents/resources/html/${path}?ref=${commit}`)
+    const body = (await res.json()) as { name: string; sha: string; size?: number; type: string }[]
+    if (!Array.isArray(body)) throw new Error(`GitHub contents ${dir} is not a directory`)
+    for (const ent of body) {
+      if (ent.type !== "file" || !IMAGE_EXT.has(extOf(ent.name))) continue
+      if (keep && !keep.has(ent.name)) continue
+      out.push({ path: `html/${dir}/${ent.name}`, sha: ent.sha, size: ent.size || 0 })
+    }
+  }
+  return out
+}
+
 async function loadInfoState(env: Env): Promise<InfoState> {
   const obj = await env.ILLS.get(INFO_STATE_KEY)
-  if (!obj) return { manifest: {}, pending: [] }
+  if (!obj) return { manifest: {}, pending: [], live: [] }
   try {
     const parsed = JSON.parse(await obj.text()) as InfoState
     return {
@@ -393,18 +465,21 @@ async function loadInfoState(env: Env): Promise<InfoState> {
       target: parsed.target,
       manifest: parsed.manifest && typeof parsed.manifest === "object" ? parsed.manifest : {},
       pending: Array.isArray(parsed.pending) ? parsed.pending : [],
+      live: Array.isArray(parsed.live) ? parsed.live : [],
       phigros: parsed.phigros,
       phigrosVerNum: parsed.phigrosVerNum,
       levelsSha: parsed.levelsSha,
       levelsSongs: parsed.levelsSongs,
       levelsMax: parsed.levelsMax,
       levelsError: parsed.levelsError,
+      tagTreeSha: parsed.tagTreeSha,
+      tagTreeError: parsed.tagTreeError,
       updatedAt: parsed.updatedAt,
       lastError: parsed.lastError,
       lastRun: parsed.lastRun,
     }
   } catch {
-    return { manifest: {}, pending: [] }
+    return { manifest: {}, pending: [], live: [] }
   }
 }
 
@@ -442,47 +517,29 @@ async function readPhigrosVersion(
   return last
 }
 
-async function copyInfo(env: Env, commit: string, state: InfoState): Promise<NonNullable<InfoState["lastRun"]>> {
-  const started = Date.now()
-  let copied = 0
-  let skipped = 0
-  let failed = 0
-  const leftover: FileEnt[] = []
+function htmlRel(path: string): string {
+  return path.slice("html/".length)
+}
+
+async function copyInfo(env: Env, commit: string, state: InfoState): Promise<RunSummary> {
   const repo = infoRepo(env)
-  const prefix = infoPrefixOf(env)
-  for (const file of state.pending) {
-    if (file.path === "info.csv") continue
-    try {
-      const kind = await putBlob(
-        env,
-        repo,
-        commit,
-        `resources/info/${file.path}`,
-        `${prefix}/${file.path}`,
-        file.sha,
-      )
-      if (kind === "copied") copied += 1
-      else skipped += 1
-      state.manifest[file.path] = file.sha
-    } catch (err) {
-      failed += 1
-      leftover.push(file)
-      state.lastError = err instanceof Error ? err.message : String(err)
-    }
-  }
-  state.pending = leftover.filter(file => file.path !== "info.csv")
+  const run = await drain(state, commit, file =>
+    file.path.startsWith("html/")
+      ? putBlob(env, repo, commit, `resources/${file.path}`, `${htmlPrefixOf(env)}/${htmlRel(file.path)}`, file.sha)
+      : putBlob(env, repo, commit, `resources/info/${file.path}`, `${infoPrefixOf(env)}/${file.path}`, file.sha),
+  )
   if (!state.pending.length) {
     state.commit = commit
     state.lastError = undefined
+    if (state.live.length) {
+      const keep = new Set(state.live)
+      for (const path of Object.keys(state.manifest)) {
+        if (path.startsWith("html/") && !keep.has(path)) delete state.manifest[path]
+      }
+      await dropStale(env, `${htmlPrefixOf(env)}/`, new Set(state.live.map(htmlRel)))
+    }
   }
-  return {
-    copied,
-    skipped,
-    failed,
-    remaining: state.pending.length,
-    ms: Date.now() - started,
-    commit,
-  }
+  return run
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -494,11 +551,15 @@ function infoFileUrl(env: Env): string {
   return env.INFOFILE_URL?.trim() || DEFAULT_INFOFILE_URL
 }
 
+function tagTreeUrl(env: Env): string {
+  return env.TAGTREE_URL?.trim() || DEFAULT_TAGTREE_URL
+}
+
 function infoKvKey(env: Env): string {
   return env.INFO_KV_KEY?.trim() || DEFAULT_INFO_KV_KEY
 }
 
-export async function syncLevels(env: Env, state: InfoState): Promise<{ copied: boolean; sha: string; songs: number; maxDifficulty: number }> {
+async function syncLevels(env: Env, state: InfoState): Promise<{ copied: boolean; sha: string; songs: number; maxDifficulty: number }> {
   const res = await fetch(infoFileUrl(env), {
     headers: { Accept: "application/json", "User-Agent": "phi-ill-sync" },
     signal: AbortSignal.timeout(20_000),
@@ -534,12 +595,40 @@ export async function syncLevels(env: Env, state: InfoState): Promise<{ copied: 
   return { copied: !unchanged, sha, songs: summary.songs, maxDifficulty: summary.maxDifficulty }
 }
 
-export async function syncInfo(env: Env): Promise<InfoState> {
+async function syncTagTree(env: Env, state: InfoState): Promise<{ copied: boolean; sha: string }> {
+  const res = await fetch(tagTreeUrl(env), {
+    headers: { Accept: "application/json", "User-Agent": "phi-ill-sync" },
+    signal: AbortSignal.timeout(20_000),
+  })
+  if (!res.ok) throw new Error(`tagTree ${res.status}`)
+  const text = await res.text()
+  const parsed = JSON.parse(text) as unknown
+  if (!parsed || typeof parsed !== "object") throw new Error("tagTree invalid")
+  const sha = await sha256Hex(text)
+  const unchanged = state.tagTreeSha === sha
+  if (!unchanged) {
+    const prefix = infoPrefixOf(env)
+    await env.ILLS.put(`${prefix}/tagTree.json`, text, {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: { tagTreeSha: sha },
+    })
+    state.tagTreeSha = sha
+    state.manifest["tagTree.json"] = sha
+  }
+  state.tagTreeError = undefined
+  return { copied: !unchanged, sha }
+}
+
+async function syncInfo(env: Env): Promise<InfoState> {
   const state = await loadInfoState(env)
   const commit = await headCommit(env, infoRepo(env), infoRef(env))
-  if (!(state.target === commit && state.pending.length) && !(state.commit === commit && !state.pending.length)) {
-    const files = infoFileList(env, commit)
+  const upToDate =
+    (state.target === commit && state.pending.length > 0) || (state.commit === commit && !state.pending.length)
+  if (!upToDate || !state.live.length) {
+    const html = await listHtml(env, commit)
+    const files = [...infoFileList(env, commit), ...html]
     state.target = commit
+    state.live = html.map(file => file.path)
     state.pending = files.filter(file => state.manifest[file.path] !== file.sha)
     const ver = await readPhigrosVersion(env, commit, state.phigrosVerNum || 140)
     if (ver) {
@@ -560,22 +649,29 @@ export async function syncInfo(env: Env): Promise<InfoState> {
     }
   }
   try {
-    const levels = await syncLevels(env, state)
-    if (levels.copied) {
-      state.lastRun = {
-        copied: (state.lastRun?.copied || 0) + 1,
-        skipped: state.lastRun?.skipped || 0,
-        failed: state.lastRun?.failed || 0,
-        remaining: state.lastRun?.remaining || 0,
-        ms: state.lastRun?.ms || 0,
-        commit,
-      }
-    }
+    if ((await syncLevels(env, state)).copied) countCopied(state, commit)
   } catch (err) {
     state.levelsError = err instanceof Error ? err.message : String(err)
   }
+  try {
+    if ((await syncTagTree(env, state)).copied) countCopied(state, commit)
+  } catch (err) {
+    state.tagTreeError = err instanceof Error ? err.message : String(err)
+  }
   await saveInfoState(env, state)
   return state
+}
+
+function countCopied(state: InfoState, commit: string) {
+  const last = state.lastRun
+  state.lastRun = {
+    copied: (last?.copied || 0) + 1,
+    skipped: last?.skipped || 0,
+    failed: last?.failed || 0,
+    remaining: last?.remaining || 0,
+    ms: last?.ms || 0,
+    commit,
+  }
 }
 
 function publicState(state: State) {
@@ -600,6 +696,8 @@ function publicInfoState(state: InfoState) {
     levelsSongs: state.levelsSongs,
     levelsMax: state.levelsMax,
     levelsError: state.levelsError,
+    tagTreeSha: state.tagTreeSha,
+    tagTreeError: state.tagTreeError,
     updatedAt: state.updatedAt,
     lastError: state.lastError,
     lastRun: state.lastRun,
@@ -611,6 +709,66 @@ function authorized(req: Request, env: Env): boolean {
   if (!secret) return false
   const hdr = req.headers.get("authorization") || ""
   return hdr === `Bearer ${secret}`
+}
+
+async function proxyTap(req: Request): Promise<Response | undefined> {
+  if (new URL(req.url).pathname !== "/tap-proxy") return
+  const dest = tapProxyTarget(req.headers.get("x-tap-target"))
+  if (!dest) return new Response("not found", { status: 404 })
+  const headers = tapProxyHeaders(req.headers)
+  const body =
+    req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer()
+  let last: unknown
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(dest, {
+        method: req.method,
+        headers,
+        body,
+        signal: AbortSignal.timeout(45_000),
+      })
+      return new Response(res.body, {
+        status: res.status,
+        headers: { "content-type": res.headers.get("content-type") || "application/octet-stream" },
+      })
+    } catch (err) {
+      last = err
+    }
+  }
+  return Response.json(
+    { error: last instanceof Error ? last.message : String(last) },
+    { status: 504 },
+  )
+}
+
+async function proxyChartTag(req: Request, env: Env): Promise<Response | undefined> {
+  const dest = chartTagProxyUrl(
+    req.method,
+    new URL(req.url).pathname,
+    env.CHART_TAG_API?.trim() || DEFAULT_CHART_TAG_API,
+  )
+  if (!dest) return
+  try {
+    const res = await fetch(dest, {
+      method: req.method,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "phi-ill-sync",
+      },
+      body: req.method === "POST" ? await req.text() : undefined,
+      signal: AbortSignal.timeout(25_000),
+    })
+    return new Response(res.body, {
+      status: res.status,
+      headers: { "content-type": res.headers.get("content-type") || "application/json" },
+    })
+  } catch (err) {
+    return Response.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 504 },
+    )
+  }
 }
 
 export default {
@@ -630,8 +788,20 @@ export default {
   },
 
   async fetch(req: Request, env: Env): Promise<Response> {
-    if (!authorized(req, env)) return new Response("not found", { status: 404 })
     const url = new URL(req.url)
+    const isProxy =
+      url.pathname === "/tap-proxy" ||
+      Boolean(chartTagProxyUrl(req.method, url.pathname, env.CHART_TAG_API?.trim() || DEFAULT_CHART_TAG_API))
+    if (isProxy) {
+      if (!proxyAuthorized(req.headers, env.PROXY_SECRET)) {
+        return new Response("unauthorized", { status: 401 })
+      }
+      const tap = await proxyTap(req)
+      if (tap) return tap
+      const proxied = await proxyChartTag(req, env)
+      if (proxied) return proxied
+    }
+    if (!authorized(req, env)) return new Response("not found", { status: 404 })
     if (req.method === "GET" && url.pathname === "/") {
       return Response.json(publicState(await loadState(env)))
     }
