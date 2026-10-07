@@ -1,6 +1,6 @@
-# Keep this worker out of the webui / Yunzai workspaces.
-packages:
-  - "."
 allowBuilds:
   esbuild: true
   workerd: true
+minimumReleaseAgeExclude:
+  - miniflare@5.20261006.0-alpha
+  - wrangler@4.148.0

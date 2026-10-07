@@ -1,21 +1,16 @@
 {
-  "name": "phi-ill-sync",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev --test-scheduled",
-    "test": "node --experimental-strip-types --test src/*.test.ts"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "wrangler": "^4.127.1"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "workerd"
-    ]
-  },
-  "license": "MIT"
+	"name": "phi-ill-sync",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev --test-scheduled",
+		"test": "node --experimental-strip-types --test src/*.test.ts",
+		"fmt": "pnpx @biomejs/biome format --write"
+	},
+	"devDependencies": {
+		"typescript": "^7.0.2",
+		"wrangler": "^4.148.0"
+	},
+	"license": "MIT"
 }
