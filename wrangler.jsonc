@@ -5,6 +5,7 @@
 	"account_id": "84f15756736ca53a547ffa05d311056f",
 	"workers_dev": true,
 	"preview_urls": false,
+	"routes": [{ "pattern": "sync.phibot.dev", "custom_domain": true }],
 	"triggers": {
 		"crons": ["*/15 * * * *"]
 	},
