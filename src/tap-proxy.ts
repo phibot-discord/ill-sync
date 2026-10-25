@@ -1,4 +1,5 @@
-const TAP_HOST = /(?:^|\.)tapapis\.cn$|(?:^|\.)tapfiles\.cn$/i;
+const TAP_HOST =
+	/(?:^|\.)tapapis\.cn$|(?:^|\.)tapfiles\.cn$|(?:^|\.)qiniup\.com$/i;
 
 export function tapProxyTarget(
 	raw: string | null | undefined,

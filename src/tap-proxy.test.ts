@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { tapProxyHeaders, tapProxyTarget } from "./tap-proxy.ts";
 
-test("tap proxy allowlists CN TapTap hosts only", () => {
+test("tap proxy allowlists CN TapTap hosts and the Qiniu save upload", () => {
 	assert.equal(
 		tapProxyTarget("https://rak3ffdi.cloud.tds1.tapapis.cn/1.1/users/me"),
 		"https://rak3ffdi.cloud.tds1.tapapis.cn/1.1/users/me",
@@ -12,6 +12,13 @@ test("tap proxy allowlists CN TapTap hosts only", () => {
 		"https://accounts.tapapis.cn/oauth2/v1/token",
 	);
 	assert.ok(tapProxyTarget("https://file.tapfiles.cn/save.zip"));
+	assert.equal(
+		tapProxyTarget(
+			"https://upload.qiniup.com/buckets/b/objects/a2V5/uploads/u/1",
+		),
+		"https://upload.qiniup.com/buckets/b/objects/a2V5/uploads/u/1",
+	);
+	assert.equal(tapProxyTarget("https://qiniup.com.example.com/"), undefined);
 	assert.equal(
 		tapProxyTarget("https://kviehlel.cloud.ap-sg.tapapis.com/1.1/users/me"),
 		undefined,
